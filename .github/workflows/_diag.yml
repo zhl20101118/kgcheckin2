@@ -1,0 +1,40 @@
+name: _diag
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: 诊断取码管线
+        env:
+          NOTE_USER: ${{ secrets.NOTE_USER }}
+          NOTE_PASS: ${{ secrets.NOTE_PASS }}
+        run: |
+          set -x
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+          start="2026-10-23 16:21:46"
+          echo "jq版本: $(jq --version)"
+          curl -s -c /tmp/ck.txt -A "$UA" -X POST "https://note.zhl2010.ccwu.cc/login" \
+            -F "username=$NOTE_USER" -F "password=$NOTE_PASS" -o /dev/null
+          raw=$(curl -s -b /tmp/ck.txt -A "$UA" -H "Accept: application/json" --max-time 15 "https://note.zhl2010.ccwu.cc/code/?_=$RANDOM")
+          echo "响应长度: $(printf '%s' "$raw" | wc -c)"
+          echo "== 分段测试 =="
+          echo -n "root type: "; printf '%s' "$raw" | jq -r 'type'
+          echo -n "items len: "; printf '%s' "$raw" | jq -r '(if type=="object" then (.items // .codes // []) else . end) | length'
+          echo -n "select len: "; printf '%s' "$raw" | jq -r --arg s "$start" '(if type=="object" then (.items // .codes // []) else . end) | [.[] | select(.time > $s)] | length'
+          echo -n "orig expr: "; printf '%s' "$raw" | jq -r --arg s "$start" '(if type=="object" then (.items // .codes // []) else . end) | [.[] | select(.time > $s)][0].code // empty' | head -c 80
+          echo ""
+          echo "== 最新 3 条（数字打码）=="
+          printf '%s' "$raw" | jq -r '(if type=="object" then (.items // .codes // []) else . end) | .[:3][] | "时间=\(.time) keys=\(keys|join(",")) 码片段=\((.code // "" | tostring | gsub("[0-9]";"#" ))[0:120])"'
+          echo "== 提码测试（最新 3 条各自跑 sed）=="
+          for idx in 0 1 2; do
+            sms=$(printf '%s' "$raw" | jq -r --argjson i "$idx" '(if type=="object" then (.items // .codes // []) else . end) | .[$i].code // empty')
+            t=$(printf '%s' "$raw" | jq -r --argjson i "$idx" '(if type=="object" then (.items // .codes // []) else . end) | .[$i].time // empty')
+            code=$(printf '%s' "$sms" | sed -n 's/.*登录验证码\([0-9]\{4,8\}\).*/\1/p' | head -1)
+            if [ -z "$code" ]; then code=$(printf '%s' "$sms" | grep -oE '[0-9]{6}' | tail -1); fi
+            masked=$(printf '%s' "$code" | sed 's/./&/3; s/\(.\{2\}\).*/\1##/')
+            echo "idx=$idx time=$t 提取长度=${#code} 前2位=${code:0:2}"
+          done
