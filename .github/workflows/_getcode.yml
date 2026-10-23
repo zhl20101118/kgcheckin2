@@ -18,8 +18,11 @@ jobs:
           start=$(TZ=Asia/Shanghai date -d '-3 minutes' '+%Y-%m-%d %H:%M:%S')
           echo "查找时间晚于 $start（北京时间）的验证码"
           for i in $(seq 1 15); do
-            codes=$(curl -s --max-time 15 -H "Cookie: admin_token=$NOTE_TOKEN" "https://note.zhl2010.ccwu.cc/code/" || echo "[]")
-            code=$(echo "$codes" | jq -r --arg s "$start" '[.[] | select(.time > $s)][0].code // empty')
+            codes=$(curl -s --max-time 15 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36" -H "Accept: application/json" -H "Cookie: admin_token=$NOTE_TOKEN" "https://note.zhl2010.ccwu.cc/code/" || echo "[]")
+            code=$(printf '%s' "$codes" | jq -r --arg s "$start" '[.[] | select(.time > $s)][0].code // empty' 2>/dev/null || echo "")
+            if [ -z "$code" ] && ! printf '%s' "$codes" | jq -e . >/dev/null 2>&1; then
+              echo "第 $i 次轮询：看板返回非 JSON（长度 $(printf '%s' "$codes" | wc -c)），重试"
+            fi
             if [ -n "$code" ]; then
               gh secret set CODE --body "$code" --repo "$REPO"
               echo "CODE secret 已更新（第 $i 次轮询命中）"
