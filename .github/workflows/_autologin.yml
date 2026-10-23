@@ -34,7 +34,7 @@ jobs:
         env:
           PHONE: ${{ secrets.PHONE }}
       - name: 等待短信与转发
-        run: sleep 40
+        run: sleep 45
       - name: 从看板取码并登录
         env:
           NOTE_USER: ${{ secrets.NOTE_USER }}
@@ -52,18 +52,25 @@ jobs:
           curl -s -c /tmp/ck.txt -A "$UA" -X POST "https://note.zhl2010.ccwu.cc/login" \
             -F "username=$NOTE_USER" -F "password=$NOTE_PASS" -o /dev/null || true
           code=""
-          for i in $(seq 1 24); do
-            raw=$(curl -s -b /tmp/ck.txt -A "$UA" -H "Accept: application/json" --max-time 15 "https://note.zhl2010.ccwu.cc/code/" || echo "")
-            code=$(printf '%s' "$raw" | jq -r --arg s "$start" '[.[] | select(.time > $s)][0].code // empty' 2>/dev/null || echo "")
+          for i in $(seq 1 26); do
+            raw=$(curl -s -b /tmp/ck.txt -A "$UA" -H "Accept: application/json" -H "Cache-Control: no-cache" --max-time 15 "https://note.zhl2010.ccwu.cc/code/?_=$RANDOM$i" || echo "")
+            # 兼容 {"items":[...]} 与 [...] 两种格式；code 字段是整条短信，需提取数字验证码
+            sms=$(printf '%s' "$raw" | jq -r --arg s "$start" '(if type=="object" then (.items // .codes // []) else . end) | [.[] | select(.time > $s)][0].code // empty' 2>/dev/null || echo "")
+            code=$(printf '%s' "$sms" | sed -n 's/.*登录验证码\([0-9]\{4,8\}\).*/\1/p' | head -1)
+            if [ -z "$code" ] && [ -n "$sms" ]; then
+              code=$(printf '%s' "$sms" | grep -oE '[0-9]{6}' | tail -1)
+            fi
             if [ -n "$code" ]; then
               echo "第 $i 次轮询取到验证码（长度 ${#code}）"
               break
             fi
-            echo "第 $i 次轮询：尚无新码（响应长度 $(printf '%s' "$raw" | wc -c)）"
+            ncnt=$(printf '%s' "$raw" | jq -r '(if type=="object" then (.items // []) else . end) | length' 2>/dev/null || echo "?")
+            newest=$(printf '%s' "$raw" | jq -r '(if type=="object" then (.items // []) else . end) | .[0].time // "无"' 2>/dev/null || echo "?")
+            echo "第 $i 次轮询：无新码（条数=$ncnt 最新=$newest）"
             sleep 10
           done
           if [ -z "$code" ]; then
-            echo "::error::5 分钟内看板未出现新验证码"
+            echo "::error::5 分钟内看板未出现新验证码（请检查手机短信转发器是否在线）"
             exit 1
           fi
           echo "开始手机号登录"
