@@ -26,7 +26,7 @@ jobs:
             exit 1
           fi
           echo "看板登录成功"
-          start=$(TZ=Asia/Shanghai date -d '-10 minutes' '+%Y-%m-%d %H:%M:%S')
+          start=$(TZ=Asia/Shanghai date -d '-20 minutes' '+%Y-%m-%d %H:%M:%S')
           echo "查找时间晚于 $start（北京时间）的验证码"
           for i in $(seq 1 15); do
             codes=$(curl -s --max-time 15 -A "$UA" -b "$jar" "https://note.zhl2010.ccwu.cc/code/" || echo "[]")
