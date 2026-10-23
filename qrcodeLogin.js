@@ -309,6 +309,7 @@ async function waitMode() {
     // 写入扫码结果到 Summary
     const resultLines = results.map(r => `- 账号 ${r.index}/${number}：${r.status}`).join('\n')
     appendSummary(`### 扫码结果\n\n${resultLines}`)
+    return results
   } finally {
     close_api(api)
   }
@@ -316,7 +317,11 @@ async function waitMode() {
 
 const mode = process.argv[2] || 'gen'
 if (mode === 'wait') {
-  waitMode().then(() => process.exit(0)).catch(e => { console.error(e); process.exit(1) })
+  waitMode().then((results) => {
+    // 超时/过期/未登录都返回非 0，避免工作流假成功
+    if (Array.isArray(results) && results.some(r => !String(r.status).includes('✅'))) process.exit(1)
+    process.exit(0)
+  }).catch(e => { console.error(e); process.exit(1) })
 } else {
   genMode().then(() => process.exit(0)).catch(e => { console.error(e); process.exit(1) })
 }

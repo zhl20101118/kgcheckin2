@@ -84,6 +84,9 @@
   @keyframes spin{to{transform:rotate(360deg)}}
   code{background:var(--card2);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:12.5px}
 </style>
+<script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers@0.7.11/dist/browsers-sumo/sodium.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/scrypt-js@3.0.1/scrypt.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -156,6 +159,45 @@
     </div>
 
     <div class="card">
+      <h2>④ 登录账号</h2>
+      <div class="row" style="padding-top:0">
+        <span class="k">短信验证码登录</span>
+        <span id="smsBadge"></span>
+      </div>
+      <label class="f">手机号</label>
+      <input type="text" id="phoneInput" placeholder="11 位手机号" inputmode="numeric" maxlength="11" autocomplete="tel">
+      <label class="switch" style="margin-top:10px">
+        <input type="checkbox" id="rememberPhone">
+        <span class="track"></span>
+        <span>记住手机号（仅保存在本机浏览器）</span>
+      </label>
+      <div class="btnrow">
+        <button class="btn ghost" id="sendCodeBtn">📤 发送验证码</button>
+      </div>
+      <label class="f">短信验证码</label>
+      <input type="text" id="codeInput" placeholder="收到的验证码" inputmode="numeric" maxlength="8">
+      <div class="btnrow">
+        <button class="btn" id="codeLoginBtn">✅ 验证码登录</button>
+      </div>
+      <div class="hint" id="smsHint">手机号与验证码只临时写入仓库 Secret（加密存储，页面不可见），登录成功后自动更新 USERINFO。</div>
+
+      <div class="row" style="margin-top:12px">
+        <span class="k">二维码登录</span>
+        <span id="qrBadge"></span>
+      </div>
+      <label class="f">二维码口令 QR_PASS</label>
+      <input type="password" id="qrPassInput" placeholder="QR_PASS 口令（保存在本机浏览器）" autocomplete="off">
+      <div class="btnrow">
+        <button class="btn ghost" id="qrLoginBtn">🎞 生成二维码</button>
+      </div>
+      <div id="qrShow" class="hidden" style="margin-top:12px;text-align:center">
+        <img id="qrImg" alt="登录二维码" style="width:220px;height:220px;border-radius:12px;background:#fff;padding:8px">
+        <div class="hint">用「酷狗音乐」APP 扫一扫并确认登录（约 2 分钟内有效）</div>
+      </div>
+      <div class="hint" id="qrHint"></div>
+    </div>
+
+    <div class="card">
       <h2>最近运行记录 <a href="#" id="actionsLink" target="_blank" rel="noopener" style="margin-left:auto;font-weight:400;text-transform:none;letter-spacing:0;color:var(--accent);text-decoration:none">全部 →</a></h2>
       <div id="runsList"><div class="hint">加载中…</div></div>
     </div>
@@ -184,7 +226,11 @@ const el = {
   delayBox: $("delayBox"), delayMin: $("delayMin"), settingsPreview: $("settingsPreview"),
   saveSettingsBtn: $("saveSettingsBtn"), reloadBtn: $("reloadBtn"),
   runsList: $("runsList"), actionsLink: $("actionsLink"), repoSub: $("repoSub"),
-  toast: $("toast")
+  toast: $("toast"),
+  phoneInput: $("phoneInput"), rememberPhone: $("rememberPhone"), sendCodeBtn: $("sendCodeBtn"),
+  codeInput: $("codeInput"), codeLoginBtn: $("codeLoginBtn"), smsBadge: $("smsBadge"), smsHint: $("smsHint"),
+  qrPassInput: $("qrPassInput"), qrLoginBtn: $("qrLoginBtn"), qrShow: $("qrShow"),
+  qrImg: $("qrImg"), qrBadge: $("qrBadge"), qrHint: $("qrHint")
 };
 
 let state = { sha: null, text: "", cron: null, delaySec: null, login: null, polling: false };
@@ -224,6 +270,7 @@ function durText(startIso, endIso){
   return Math.floor(sec / 60) + " 分 " + (sec % 60) + " 秒";
 }
 function getToken(){ return localStorage.getItem(TOKEN_KEY) || ""; }
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
 /* ---------- GitHub API ---------- */
 async function api(path, opts){
@@ -462,6 +509,154 @@ function pollRun(beforeIds){
   });
 }
 
+/* ---------- 登录账号（验证码 / 二维码） ---------- */
+async function ensureSodium(){
+  if (typeof sodium === "undefined") throw new Error("安全组件未加载（CDN 不可达），请刷新页面重试");
+  await sodium.ready;
+}
+async function setSecret(name, value){
+  await ensureSodium();
+  const j = await api(`/repos/${OWNER}/${REPO}/actions/secrets/public-key`);
+  const pk = sodium.from_base64(j.key, sodium.base64_variants.ORIGINAL);
+  const sealed = sodium.crypto_box_seal(sodium.from_string(String(value)), pk);
+  await api(`/repos/${OWNER}/${REPO}/actions/secrets/${name}`, {
+    method: "PUT",
+    body: JSON.stringify({ encrypted_value: sodium.to_base64(sealed, sodium.base64_variants.ORIGINAL), key_id: j.key_id })
+  });
+}
+async function runWf(wfName, inputs, badgeEl, hintEl, doneMsg){
+  badgeEl.innerHTML = badge("queued");
+  hintEl.textContent = "正在触发工作流…";
+  const before = new Set((await api(`/repos/${OWNER}/${REPO}/actions/workflows/${encodeURIComponent(wfName)}/runs?per_page=5`)).workflow_runs.map(r => r.id));
+  await api(`/repos/${OWNER}/${REPO}/actions/workflows/${encodeURIComponent(wfName)}/dispatches`, {
+    method: "POST", body: JSON.stringify({ ref: BRANCH, inputs })
+  });
+  hintEl.textContent = "已触发，等待 GitHub 排队…";
+  let runId = null;
+  for (let i = 0; i < 120; i++){
+    await sleep(3000);
+    if (!runId){
+      const runs = (await api(`/repos/${OWNER}/${REPO}/actions/workflows/${encodeURIComponent(wfName)}/runs?per_page=5`)).workflow_runs;
+      const fresh = runs.find(r => !before.has(r.id));
+      if (fresh){ runId = fresh.id; }
+      continue;
+    }
+    const run = await api(`/repos/${OWNER}/${REPO}/actions/runs/${runId}`);
+    badgeEl.innerHTML = badge(run.status, run.conclusion);
+    if (run.status === "completed"){
+      const ok = run.conclusion === "success";
+      hintEl.textContent = ok ? doneMsg : `运行未成功（${run.conclusion || "?"}），详情见 Actions 日志`;
+      if (ok) loadRuns();
+      return ok;
+    }
+    hintEl.textContent = "运行中…";
+  }
+  hintEl.textContent = "等待超时，请稍后刷新查看";
+  return false;
+}
+async function smsSendCode(){
+  const phone = el.phoneInput.value.trim();
+  if (!/^1\d{10}$/.test(phone)){ toast("请输入 11 位手机号", "err"); return; }
+  if (el.rememberPhone.checked) localStorage.setItem("kg_phone", phone);
+  else localStorage.removeItem("kg_phone");
+  el.sendCodeBtn.disabled = true;
+  try {
+    await setSecret("PHONE", phone);
+    await runWf("手机号登录.yml", { step: "发送验证码" }, el.smsBadge, el.smsHint, "✅ 验证码已发送，请查收短信");
+  } catch (e){
+    el.smsBadge.innerHTML = badge("completed", "failure");
+    el.smsHint.textContent = "失败：" + (e.message || e);
+    toast("发送失败：" + (e.message || e), "err");
+  } finally {
+    el.sendCodeBtn.disabled = false;
+  }
+}
+async function smsLogin(){
+  const code = el.codeInput.value.trim();
+  if (!/^\d{4,8}$/.test(code)){ toast("请输入收到的验证码", "err"); return; }
+  el.codeLoginBtn.disabled = true;
+  try {
+    await setSecret("CODE", code);
+    const ok = await runWf("手机号登录.yml", { step: "登录", append_user: "否" }, el.smsBadge, el.smsHint, "✅ 登录成功，USERINFO 已更新");
+    if (ok) el.codeInput.value = "";
+  } catch (e){
+    el.smsBadge.innerHTML = badge("completed", "failure");
+    el.smsHint.textContent = "失败：" + (e.message || e);
+    toast("登录失败：" + (e.message || e), "err");
+  } finally {
+    el.codeLoginBtn.disabled = false;
+  }
+}
+async function decryptQrBundle(enc, pass){
+  if (typeof scrypt === "undefined") throw new Error("解密组件未加载（CDN 不可达），请刷新重试或改用验证码登录");
+  const salt = enc.slice(0, 16), iv = enc.slice(16, 28), tag = enc.slice(28, 44), ct = enc.slice(44);
+  const keyBytes = await scrypt.scrypt(new TextEncoder().encode(pass), salt, 16384, 8, 1, 32);
+  const ck = await crypto.subtle.importKey("raw", new Uint8Array(keyBytes), "AES-GCM", false, ["decrypt"]);
+  const combined = new Uint8Array(ct.length + 16);
+  combined.set(ct); combined.set(tag, ct.length);
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: new Uint8Array(iv) }, ck, combined);
+  const json = JSON.parse(new TextDecoder().decode(pt));
+  const name = Object.keys(json.files || {}).find(n => n.endsWith(".png")) || Object.keys(json.files || {})[0];
+  if (!name) throw new Error("解密成功但包内没有文件");
+  return json.files[name];
+}
+async function qrLogin(){
+  const pass = el.qrPassInput.value.trim();
+  if (!pass){ toast("请先填写 QR_PASS 口令", "err"); return; }
+  localStorage.setItem("kg_qr_pass", pass);
+  el.qrLoginBtn.disabled = true;
+  el.qrShow.classList.add("hidden");
+  el.qrBadge.innerHTML = badge("queued");
+  try {
+    const wfName = "二维码登录.yml";
+    el.qrHint.textContent = "正在生成加密二维码…";
+    const before = new Set((await api(`/repos/${OWNER}/${REPO}/actions/workflows/${encodeURIComponent(wfName)}/runs?per_page=5`)).workflow_runs.map(r => r.id));
+    await api(`/repos/${OWNER}/${REPO}/actions/workflows/${encodeURIComponent(wfName)}/dispatches`, {
+      method: "POST", body: JSON.stringify({ ref: BRANCH, inputs: { number: "1", append_user: "否" } })
+    });
+    let art = null;
+    for (let i = 0; i < 40 && !art; i++){
+      await sleep(3000);
+      const runs = (await api(`/repos/${OWNER}/${REPO}/actions/workflows/${encodeURIComponent(wfName)}/runs?per_page=5`)).workflow_runs;
+      const fresh = runs.find(r => !before.has(r.id));
+      if (!fresh) continue;
+      el.qrBadge.innerHTML = badge("in_progress");
+      const arts = (await api(`/repos/${OWNER}/${REPO}/actions/runs/${fresh.id}/artifacts`)).artifacts || [];
+      const a = arts.find(x => x.name === "qr-bundle");
+      if (a) art = { a, runId: fresh.id };
+    }
+    if (!art) throw new Error("等待二维码产物超时，请重试");
+    el.qrHint.textContent = "下载并解密二维码…";
+    const resp = await fetch(art.a.archive_download_url, { headers: { "Authorization": "Bearer " + getToken() } });
+    if (!resp.ok) throw new Error("二维码下载失败 HTTP " + resp.status);
+    const zipBuf = new Uint8Array(await resp.arrayBuffer());
+    const files = (typeof fflate !== "undefined") ? fflate.unzipSync(zipBuf) : null;
+    const enc = files && files["qr_bundle.enc"];
+    if (!enc) throw new Error("未取到 qr_bundle.enc（压缩组件不可用或产物异常）");
+    const pngB64 = await decryptQrBundle(enc, pass);
+    el.qrImg.src = "data:image/png;base64," + pngB64;
+    el.qrShow.classList.remove("hidden");
+    el.qrHint.textContent = "请用「酷狗音乐」APP 扫码并确认登录（2 分钟内有效）";
+    el.qrBadge.innerHTML = badge("in_progress");
+    let run = await api(`/repos/${OWNER}/${REPO}/actions/runs/${art.runId}`);
+    while (run.status !== "completed"){
+      await sleep(4000);
+      run = await api(`/repos/${OWNER}/${REPO}/actions/runs/${art.runId}`);
+      el.qrBadge.innerHTML = badge(run.status, run.conclusion);
+    }
+    const ok = run.conclusion === "success";
+    el.qrHint.textContent = ok ? "✅ 扫码登录成功，USERINFO 已更新" : "未完成扫码（" + (run.conclusion || "?") + "），可重新生成再扫";
+    toast(ok ? "登录成功" : "未完成扫码", ok ? "ok" : "err");
+    if (ok) loadRuns();
+  } catch (e){
+    el.qrBadge.innerHTML = badge("completed", "failure");
+    el.qrHint.textContent = "失败：" + (e.message || e);
+    toast(e.message || String(e), "err");
+  } finally {
+    el.qrLoginBtn.disabled = false;
+  }
+}
+
 /* ---------- 事件绑定 ---------- */
 el.saveTokenBtn.addEventListener("click", async () => {
   const t = el.tokenInput.value.trim();
@@ -480,6 +675,12 @@ el.logoutBtn.addEventListener("click", () => {
   toast("已退出", "ok");
 });
 el.runBtn.addEventListener("click", doCheckin);
+el.sendCodeBtn.addEventListener("click", smsSendCode);
+el.codeLoginBtn.addEventListener("click", smsLogin);
+el.qrLoginBtn.addEventListener("click", qrLogin);
+el.phoneInput.value = localStorage.getItem("kg_phone") || "";
+el.rememberPhone.checked = !!localStorage.getItem("kg_phone");
+el.qrPassInput.value = localStorage.getItem("kg_qr_pass") || "";
 el.reloadBtn.addEventListener("click", async () => {
   try { await loadWorkflow(); await loadRuns(); toast("已刷新", "ok"); }
   catch (e){ toast(e.message, "err"); }
