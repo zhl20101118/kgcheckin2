@@ -1,0 +1,70 @@
+name: _autologin
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+      - name: 创建 Node 环境
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'npm'
+          cache-dependency-path: ./api/package-lock.json
+      - name: 缓存依赖
+        id: cache-npm
+        uses: actions/cache@v4
+        with:
+          path: ./api/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('./api/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+      - name: 安装依赖
+        run: npm run install
+        if: ${{ steps.cache-npm.outputs.cache-hit != 'true' }}
+      - name: 发送验证码
+        run: |
+          echo "START=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+          npm run sent
+        env:
+          PHONE: ${{ secrets.PHONE }}
+      - name: 等待短信与转发
+        run: sleep 40
+      - name: 从看板取码并登录
+        env:
+          NOTE_USER: ${{ secrets.NOTE_USER }}
+          NOTE_PASS: ${{ secrets.NOTE_PASS }}
+          PHONE: ${{ secrets.PHONE }}
+          PAT: ${{ secrets.PAT }}
+          USERINFO: ${{ secrets.USERINFO }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          APPEND_USER: "否"
+        run: |
+          set -u
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+          start="${START}"
+          echo "看板时间窗起点(北京时间): $start"
+          curl -s -c /tmp/ck.txt -A "$UA" -X POST "https://note.zhl2010.ccwu.cc/login" \
+            -F "username=$NOTE_USER" -F "password=$NOTE_PASS" -o /dev/null || true
+          code=""
+          for i in $(seq 1 24); do
+            raw=$(curl -s -b /tmp/ck.txt -A "$UA" -H "Accept: application/json" --max-time 15 "https://note.zhl2010.ccwu.cc/code/" || echo "")
+            code=$(printf '%s' "$raw" | jq -r --arg s "$start" '[.[] | select(.time > $s)][0].code // empty' 2>/dev/null || echo "")
+            if [ -n "$code" ]; then
+              echo "第 $i 次轮询取到验证码（长度 ${#code}）"
+              break
+            fi
+            echo "第 $i 次轮询：尚无新码（响应长度 $(printf '%s' "$raw" | wc -c)）"
+            sleep 10
+          done
+          if [ -z "$code" ]; then
+            echo "::error::5 分钟内看板未出现新验证码"
+            exit 1
+          fi
+          echo "开始手机号登录"
+          CODE="$code" npm run phoneLogin
