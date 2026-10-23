@@ -1,0 +1,32 @@
+name: _getcode
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: write
+jobs:
+  get:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: 从验证码看板取码并写入 CODE Secret
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+          NOTE_TOKEN: ${{ secrets.NOTE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          start=$(TZ=Asia/Shanghai date -d '-3 minutes' '+%Y-%m-%d %H:%M:%S')
+          echo "查找时间晚于 $start（北京时间）的验证码"
+          for i in $(seq 1 15); do
+            codes=$(curl -s --max-time 15 -H "Cookie: admin_token=$NOTE_TOKEN" "https://note.zhl2010.ccwu.cc/code/" || echo "[]")
+            code=$(echo "$codes" | jq -r --arg s "$start" '[.[] | select(.time > $s)][0].code // empty')
+            if [ -n "$code" ]; then
+              gh secret set CODE --body "$code" --repo "$REPO"
+              echo "CODE secret 已更新（第 $i 次轮询命中）"
+              exit 0
+            fi
+            echo "第 $i 次轮询：暂无新验证码"
+            sleep 10
+          done
+          echo "看板中未找到新验证码"
+          exit 1
