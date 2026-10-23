@@ -52,10 +52,10 @@ jobs:
           curl -s -c /tmp/ck.txt -A "$UA" -X POST "https://note.zhl2010.ccwu.cc/login" \
             -F "username=$NOTE_USER" -F "password=$NOTE_PASS" -o /dev/null || true
           code=""
-          for i in $(seq 1 26); do
+          for i in $(seq 1 55); do
             raw=$(curl -s -b /tmp/ck.txt -A "$UA" -H "Accept: application/json" -H "Cache-Control: no-cache" --max-time 15 "https://note.zhl2010.ccwu.cc/code/?_=$RANDOM$i" || echo "")
             # 兼容 {"items":[...]} 与 [...] 两种格式；code 字段是整条短信，需提取数字验证码
-            sms=$(printf '%s' "$raw" | jq -r --arg s "$start" '(if type=="object" then (.items // .codes // []) else . end) | [.[] | select(.time > $s)][0].code // empty' 2>/dev/null || echo "")
+            sms=$(printf '%s' "$raw" | jq -r --arg s "$start" '(if type=="object" then (.items // .codes // []) else . end) | [.[] | select(.time > $s) | select((.code // "") | test("酷狗|登录验证码"))][0].code // empty' 2>/dev/null || echo "")
             code=$(printf '%s' "$sms" | sed -n 's/.*登录验证码\([0-9]\{4,8\}\).*/\1/p' | head -1)
             if [ -z "$code" ] && [ -n "$sms" ]; then
               code=$(printf '%s' "$sms" | grep -oE '[0-9]{6}' | tail -1)
@@ -70,7 +70,7 @@ jobs:
             sleep 10
           done
           if [ -z "$code" ]; then
-            echo "::error::5 分钟内看板未出现新验证码（请检查手机短信转发器是否在线）"
+            echo "::error::10 分钟内看板未出现酷狗验证码短信"
             exit 1
           fi
           echo "开始手机号登录"
